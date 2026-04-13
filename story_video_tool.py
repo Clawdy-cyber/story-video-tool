@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import time
 import re
 import shlex
 import subprocess
@@ -365,23 +367,28 @@ def synthesize_audio(project: StoryProject, base: Path, config: dict[str, Any]) 
         text_path = audio_dir / f"page-{page.page_number:02d}.txt"
         wav_path = audio_dir / f"page-{page.page_number:02d}.wav"
         text_path.write_text(script_text + "\n")
+        audio_status = "placeholder"
         if tts_provider == "edge":
             try:
                 synthesize_with_edge_tts(page, segments, wav_path, ffmpeg_cmd, config)
+                audio_status = "edge"
             except Exception as exc:
                 if create_silence:
                     create_silent_wav(wav_path, page.duration_seconds)
+                    audio_status = f"placeholder_after_error: {exc}"
                 else:
                     raise RuntimeError(f"Edge TTS failed for page {page.page_number}: {exc}") from exc
         elif tts_provider == "command" and tts_command:
             run_provider_command(tts_command, page, script_text, wav_path)
+            audio_status = "command"
         elif create_silence:
             create_silent_wav(wav_path, page.duration_seconds)
         manifest.append({
             "page": page.page_number,
             "text_file": str(text_path),
             "audio_file": str(wav_path),
-            "seconds": page.duration_seconds,
+            "seconds": wav_duration_seconds(wav_path),
+            "audio_status": audio_status,
         })
     (base / "manifests" / "audio_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -392,17 +399,21 @@ def generate_image_assets(project: StoryProject, base: Path, config: dict[str, A
     manifest = []
     for page in project.pages:
         image_path = base / "images" / f"page-{page.page_number:02d}.png"
+        image_status = "placeholder"
         if image_provider == "pollinations":
             try:
                 generate_with_pollinations(page, image_path, config)
-            except Exception:
-                pass
+                image_status = "pollinations"
+            except Exception as exc:
+                image_status = f"placeholder_after_error: {exc}"
         elif image_provider == "command" and image_command:
             run_provider_command(image_command, page, page.image_prompt, image_path)
+            image_status = "command"
         manifest.append({
             "page": page.page_number,
             "image_file": str(image_path),
             "prompt": page.image_prompt,
+            "image_status": image_status,
         })
     (base / "manifests" / "image_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 
@@ -429,6 +440,13 @@ def create_silent_wav(path: Path, seconds: float, sample_rate: int = 24000) -> N
         wav_file.writeframes(b"\x00\x00" * total_frames)
 
 
+def wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate()
+    return frames / rate if rate else 0.0
+
+
 def build_tts_segments(page: StoryPage) -> list[dict[str, str]]:
     parts = [{"speaker": "Narrator", "text": page.narration}]
     for line in page.dialogue:
@@ -443,7 +461,7 @@ def synthesize_with_edge_tts(
     ffmpeg_cmd: str,
     config: dict[str, Any],
 ) -> None:
-    edge_bin = Path(config["providers"].get("edgeTtsBinary", ".venv-story/bin/edge-tts"))
+    edge_bin = resolve_edge_tts_binary(config)
     if not edge_bin.exists():
         raise FileNotFoundError(f"edge-tts binary not found at {edge_bin}")
 
@@ -494,6 +512,27 @@ def choose_voice(speaker: str, config: dict[str, Any]) -> str:
     return cycle[idx]
 
 
+def resolve_edge_tts_binary(config: dict[str, Any]) -> Path:
+    configured = config["providers"].get("edgeTtsBinary", ".venv-story/bin/edge-tts")
+    candidate = Path(configured)
+    search_paths = []
+    if candidate.is_absolute():
+        search_paths.append(candidate)
+    else:
+        cwd = Path.cwd()
+        here = Path(__file__).resolve().parent
+        search_paths.extend([
+            cwd / candidate,
+            here / candidate,
+            here.parent / candidate,
+            cwd.parent / candidate,
+        ])
+    for path in search_paths:
+        if path.exists():
+            return path
+    return candidate
+
+
 def generate_with_pollinations(page: StoryPage, image_path: Path, config: dict[str, Any]) -> None:
     model = config["providers"].get("pollinationsModel", "flux")
     width = int(config["video"].get("width", 1280))
@@ -504,9 +543,21 @@ def generate_with_pollinations(page: StoryPage, image_path: Path, config: dict[s
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?width={width}&height={height}&model={urllib.parse.quote(str(model), safe='')}&seed={seed}"
     )
-    response = requests.get(url, timeout=180)
-    response.raise_for_status()
-    image_path.write_bytes(response.content)
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=45)
+            response.raise_for_status()
+            with Image.open(io.BytesIO(response.content)) as image:
+                image = image.convert("RGB")
+                image = image.resize((width, height))
+                image.save(image_path, format="PNG")
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"Pollinations image generation failed after retries: {last_error}")
 
 
 def write_render_script(project: StoryProject, base: Path, config: dict[str, Any]) -> None:
@@ -528,13 +579,15 @@ def write_render_script(project: StoryProject, base: Path, config: dict[str, Any
         audio_rel = f"{root_var}/audio/page-{page.page_number:02d}.wav"
         clip_rel = f"{root_var}/render/clips/page-{page.page_number:02d}.mp4"
         lines.append(
-            f"{shlex.quote(ffmpeg_cmd)} -y -loop 1 -i \"{image_rel}\" -i \"{audio_rel}\" -c:v libx264 -t {page.duration_seconds:.2f} -vf \"scale={width}:{height},fps={fps}\" -pix_fmt yuv420p -c:a aac -shortest \"{clip_rel}\""
+            f"{shlex.quote(ffmpeg_cmd)} -y -loop 1 -i \"{image_rel}\" -i \"{audio_rel}\" -c:v libx264 -vf \"scale={width}:{height},fps={fps}\" -pix_fmt yuv420p -c:a aac -shortest \"{clip_rel}\""
         )
         concat_entries.append(f"file 'clips/page-{page.page_number:02d}.mp4'")
     concat_path = render_dir / "concat.txt"
     concat_path.write_text("\n".join(concat_entries) + "\n")
     lines.append(f'cd "{root_var}/render"')
-    lines.append(f"{shlex.quote(ffmpeg_cmd)} -y -f concat -safe 0 -i concat.txt -c copy final-story.mp4")
+    lines.append(
+        f"{shlex.quote(ffmpeg_cmd)} -y -f concat -safe 0 -i concat.txt -c:v libx264 -c:a aac -pix_fmt yuv420p final-story.mp4"
+    )
     script_path = render_dir / "assemble.sh"
     script_path.write_text("\n".join(lines) + "\n")
     script_path.chmod(0o755)
@@ -603,16 +656,23 @@ def cmd_new(args: argparse.Namespace) -> int:
     generate_image_assets(project, project_dir, config)
     write_render_script(project, project_dir, config)
     write_html_preview(project, project_dir)
+    audio_manifest_path = project_dir / "manifests" / "audio_manifest.json"
+    image_manifest_path = project_dir / "manifests" / "image_manifest.json"
+    audio_manifest = json.loads(audio_manifest_path.read_text())
+    image_manifest = json.loads(image_manifest_path.read_text())
     summary = {
         "project": project.title,
         "slug": project.slug,
         "project_dir": str(project_dir.resolve()),
         "story_manifest": str((project_dir / "manifests" / "story.json").resolve()),
-        "audio_manifest": str((project_dir / "manifests" / "audio_manifest.json").resolve()),
-        "image_manifest": str((project_dir / "manifests" / "image_manifest.json").resolve()),
+        "audio_manifest": str(audio_manifest_path.resolve()),
+        "image_manifest": str(image_manifest_path.resolve()),
         "assemble_script": str((project_dir / "render" / "assemble.sh").resolve()),
         "storyboard_html": str((project_dir / "storyboard.html").resolve()),
-        "note": "If a real TTS or image provider is not configured, placeholder assets were generated instead.",
+        "tts_provider": config["providers"].get("ttsProvider"),
+        "image_provider": config["providers"].get("imageProvider"),
+        "audio_statuses": [item.get("audio_status") for item in audio_manifest],
+        "image_statuses": [item.get("image_status") for item in image_manifest],
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0

@@ -69,3 +69,6 @@ python3 story_video_tool.py validate story_video_projects/<slug>
 - The built-in real-asset path depends on network access.
 - Pollinations image output quality and consistency can vary.
 - Edge TTS uses a narrator voice plus deterministic character voice assignment.
+- The tool records per-page provider status in the manifests.
+- Pollinations downloads are normalized into real PNG files.
+- Final clip rendering follows actual audio length instead of a fixed nominal page duration.

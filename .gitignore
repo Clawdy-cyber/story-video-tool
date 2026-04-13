@@ -4,3 +4,8 @@ __pycache__/
 story_video_projects/
 story_video_projects_real/
 story_video_projects_real2/
+qa_runs/
+qa_runs_real/
+qa_runs_real_fixed/
+qa_runs_real_duration/
+qa_report.json

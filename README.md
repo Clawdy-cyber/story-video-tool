@@ -63,6 +63,16 @@ bash story_video_projects/<slug>/render/assemble.sh
 - `--real-assets` uses Edge TTS and Pollinations.
 - Remote providers can be slow or flaky, so the tool keeps fallback behavior.
 - The generated project includes manifests, audio files, images, page data, and a storyboard preview.
+- Audio and image manifests record which provider actually produced each asset.
+- Real TTS page audio can be much longer than the nominal page duration, so the renderer now follows the audio length instead of truncating it.
+
+## Smoke tests
+
+```bash
+python3 run_smoke_tests.py
+```
+
+This exercises multiple placeholder-mode stories plus one real-assets story and writes `qa_report.json`.
 
 ## Repo files
 
