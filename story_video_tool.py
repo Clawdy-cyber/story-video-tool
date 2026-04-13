@@ -418,6 +418,36 @@ def generate_image_assets(project: StoryProject, base: Path, config: dict[str, A
     (base / "manifests" / "image_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 
 
+def write_subtitles(project: StoryProject, base: Path) -> Path:
+    subtitle_path = base / "manifests" / "subtitles.srt"
+    entries = []
+    cursor = 0.0
+    index = 1
+    for page in project.pages:
+        segments = build_tts_segments(page)
+        audio_path = base / "audio" / f"page-{page.page_number:02d}.wav"
+        page_seconds = wav_duration_seconds(audio_path)
+        weights = [max(1, len(segment["text"].split())) for segment in segments]
+        total_weight = sum(weights) or 1
+        running = cursor
+        for segment, weight in zip(segments, weights):
+            seg_seconds = page_seconds * (weight / total_weight)
+            start = running
+            end = running + seg_seconds
+            if segment["speaker"] == "Narrator":
+                text = segment["text"]
+            else:
+                text = f"{segment['speaker']}: {segment['text']}"
+            entries.append(
+                f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n{text}\n"
+            )
+            index += 1
+            running = end
+        cursor += page_seconds
+    subtitle_path.write_text("\n".join(entries).strip() + "\n")
+    return subtitle_path
+
+
 def run_provider_command(template: str, page: StoryPage, payload: str, output_path: Path) -> None:
     context = {
         "page": str(page.page_number),
@@ -445,6 +475,17 @@ def wav_duration_seconds(path: Path) -> float:
         frames = wav_file.getnframes()
         rate = wav_file.getframerate()
     return frames / rate if rate else 0.0
+
+
+def format_srt_time(seconds: float) -> str:
+    total_ms = max(0, int(round(seconds * 1000)))
+    hours = total_ms // 3_600_000
+    total_ms %= 3_600_000
+    minutes = total_ms // 60_000
+    total_ms %= 60_000
+    secs = total_ms // 1000
+    millis = total_ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
 def build_tts_segments(page: StoryPage) -> list[dict[str, str]]:
@@ -588,6 +629,9 @@ def write_render_script(project: StoryProject, base: Path, config: dict[str, Any
     lines.append(
         f"{shlex.quote(ffmpeg_cmd)} -y -f concat -safe 0 -i concat.txt -c:v libx264 -c:a aac -pix_fmt yuv420p final-story.mp4"
     )
+    lines.append(
+        f"{shlex.quote(ffmpeg_cmd)} -y -i final-story.mp4 -vf \"subtitles=../manifests/subtitles.srt:force_style='FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=28'\" -c:a copy final-story-subtitled.mp4"
+    )
     script_path = render_dir / "assemble.sh"
     script_path.write_text("\n".join(lines) + "\n")
     script_path.chmod(0o755)
@@ -654,6 +698,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     maybe_make_placeholder_images(project, project_dir, config)
     synthesize_audio(project, project_dir, config)
     generate_image_assets(project, project_dir, config)
+    subtitle_path = write_subtitles(project, project_dir)
     write_render_script(project, project_dir, config)
     write_html_preview(project, project_dir)
     audio_manifest_path = project_dir / "manifests" / "audio_manifest.json"
@@ -668,6 +713,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "audio_manifest": str(audio_manifest_path.resolve()),
         "image_manifest": str(image_manifest_path.resolve()),
         "assemble_script": str((project_dir / "render" / "assemble.sh").resolve()),
+        "subtitle_file": str(subtitle_path.resolve()),
         "storyboard_html": str((project_dir / "storyboard.html").resolve()),
         "tts_provider": config["providers"].get("ttsProvider"),
         "image_provider": config["providers"].get("imageProvider"),
