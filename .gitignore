@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv-story/
+story_video_projects/
+story_video_projects_real/
+story_video_projects_real2/

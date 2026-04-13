@@ -1,0 +1,37 @@
+video:
+  pageDurationSeconds: 6
+  width: 1280
+  height: 720
+  fps: 24
+
+providers:
+  # Modes:
+  # ttsProvider: silent | edge | command
+  # imageProvider: placeholder | pollinations | command
+  ttsProvider: silent
+  imageProvider: placeholder
+
+  # Used when ttsProvider=command
+  ttsCommand: null
+
+  # Used when imageProvider=command
+  imageCommand: null
+
+  ffmpegCommand: ffmpeg
+  edgeTtsBinary: .venv-story/bin/edge-tts
+  pollinationsModel: flux
+
+voices:
+  narrator: en-US-AvaMultilingualNeural
+  fallbackCycle:
+    - en-US-AvaMultilingualNeural
+    - en-US-BrianMultilingualNeural
+    - en-GB-SoniaNeural
+    - en-GB-RyanNeural
+    - en-AU-NatashaNeural
+    - en-AU-WilliamNeural
+
+render:
+  createPlaceholderImages: true
+  createSilenceAudio: true
+  allowAssembleWithoutAudio: false

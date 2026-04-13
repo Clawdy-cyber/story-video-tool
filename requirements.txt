@@ -1,0 +1,4 @@
+Pillow
+PyYAML
+requests
+edge-tts
